@@ -505,6 +505,65 @@ export class FileService {
         }
     }
 
+    static async saveChatMessage(
+        roomId: string,
+        messageId: string,
+        username: string,
+        message: string
+    ): Promise<boolean> {
+        try {
+            console.log(`[FileService] Saving chat message for room: ${roomId}, user: ${username}`);
+
+            const result: any = await query(
+                `INSERT INTO room_chats (room_id, message_id, username, message) 
+             VALUES (?, ?, ?, ?)`,
+                [roomId, messageId, username, message]
+            );
+
+            console.log(`[FileService] Chat message saved successfully: ${messageId}`);
+            return true;
+        } catch (error) {
+            console.error('[FileService] Error saving chat message:', error);
+            return false;
+        }
+    }
+
+    static async getRoomChatHistory(roomId: string): Promise<any[]> {
+        try {
+            console.log(`[FileService] Loading chat history for room: ${roomId}`);
+
+            const messages: any = await query(
+                `SELECT message_id as id, username, message, timestamp 
+             FROM room_chats 
+             WHERE room_id = ? 
+             ORDER BY timestamp ASC`,
+                [roomId]
+            );
+
+            // Format the timestamp for frontend
+            const formattedMessages = messages.map((msg: any) => ({
+                ...msg,
+                timestamp: this.formatChatTimestamp(msg.timestamp)
+            }));
+
+            console.log(`[FileService] Loaded ${formattedMessages.length} chat messages for room: ${roomId}`);
+            return formattedMessages;
+        } catch (error) {
+            console.error('[FileService] Error loading chat history:', error);
+            return [];
+        }
+    }
+
+    private static formatChatTimestamp(timestamp: string | Date): string {
+        // You can use your existing formatDate function or create a simple formatter
+        const date = new Date(timestamp);
+        return date.toLocaleTimeString('en-US', {
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: true
+        });
+    }
+
     private static generateFileId(): string {
         return `file_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     }

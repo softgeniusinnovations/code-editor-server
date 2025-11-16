@@ -540,12 +540,56 @@ io.on("connection", (socket) => {
     })
 
     // Handle chat actions
-    socket.on(SocketEvent.SEND_MESSAGE, ({ message }) => {
-        const roomId = getRoomId(socket.id)
-        if (!roomId) return
-        socket.broadcast
-            .to(roomId)
-            .emit(SocketEvent.RECEIVE_MESSAGE, { message })
+    socket.on(SocketEvent.SEND_MESSAGE, async ({ message }) => {
+        try {
+            const roomId = getRoomId(socket.id)
+            if (!roomId) return
+
+            console.log(`[Socket] Saving chat message in room: ${roomId}`)
+
+            // Save message to database
+            const saved = await FileService.saveChatMessage(
+                roomId,
+                message.id,
+                message.username,
+                message.message
+            );
+
+            if (!saved) {
+                console.error('[Socket] Failed to save chat message to database');
+            }
+
+            // Broadcast to other users in the room
+            socket.broadcast
+                .to(roomId)
+                .emit(SocketEvent.RECEIVE_MESSAGE, { message })
+
+            console.log(`[Socket] Chat message saved and broadcasted: ${message.id}`)
+        } catch (error) {
+            console.error('[Socket] Error handling chat message:', error)
+        }
+    })
+
+    socket.on(SocketEvent.LOAD_CHAT_HISTORY, async () => {
+        try {
+            const roomId = getRoomId(socket.id)
+            if (!roomId) return
+
+            console.log(`[Socket] Loading chat history for room: ${roomId}`)
+
+            const chatHistory = await FileService.getRoomChatHistory(roomId);
+
+            io.to(socket.id).emit(SocketEvent.CHAT_HISTORY_LOADED, {
+                messages: chatHistory
+            })
+
+            console.log(`[Socket] Chat history loaded for room: ${roomId}, messages: ${chatHistory.length}`)
+        } catch (error) {
+            console.error('[Socket] Error loading chat history:', error)
+            io.to(socket.id).emit(SocketEvent.ERROR, {
+                message: 'Failed to load chat history'
+            })
+        }
     })
 
     // Handle cursor position and selection

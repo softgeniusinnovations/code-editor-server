@@ -43,8 +43,8 @@ enum SocketEvent {
     CHAT_MESSAGE_SENT = "chat-message-sent",
     FILE_STRUCTURE_LOADED = "file-structure-loaded",
     LOAD_FILE_STRUCTURE = "load-file-structure",
-    LOAD_CHAT_HISTORY = 'LOAD_CHAT_HISTORY',
-    CHAT_HISTORY_LOADED = 'CHAT_HISTORY_LOADED',
+    LOAD_CHAT_HISTORY = 'load_chat_history',
+    CHAT_HISTORY_LOADED = 'chat_history_loaded',
 }
 
 interface SocketContext {
