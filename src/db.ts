@@ -5,9 +5,9 @@ dotenv.config();
 
 const dbConfig = {
     host: process.env.DB_HOST || 'localhost',
-    user: process.env.DB_USER || 'root',
-    password: process.env.DB_PASSWORD || '',
-    database: process.env.DB_NAME || 'code_editor',
+    user: process.env.DB_USER || 'smshagor_code_editor',
+    password: process.env.DB_PASSWORD || 'SmShagor1@1',
+    database: process.env.DB_NAME || 'smshagor_code_editor',
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0
