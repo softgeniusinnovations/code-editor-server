@@ -8,6 +8,7 @@ import { Server } from "socket.io"
 import path from "path"
 import { FileService } from "./services/fileService"
 import { v4 as uuidv4 } from 'uuid'
+import multer from "multer"
 
 dotenv.config()
 
@@ -67,6 +68,52 @@ function generateUniqueUsername(baseUsername: string, existingUsers: User[]): st
 
     return uniqueUsername;
 }
+
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        cb(null, path.join(__dirname, "../uploads"))
+    },
+    filename: (req, file, cb) => {
+        const ext = path.extname(file.originalname)
+        const unique = Date.now() + "-" + Math.round(Math.random() * 1e9)
+        cb(null, unique + ext)
+    }
+})
+
+const upload = multer({ storage })
+
+
+// ------------ USER PHOTO UPLOAD -------------
+app.post("/upload-photo", upload.single("photo"), async (req: Request, res: Response) => {
+    try {
+        const { roomId, username } = req.body
+
+        if (!req.file) {
+            return res.status(400).json({ error: "No file uploaded" })
+        }
+
+        const filePath = `/uploads/${req.file.filename}`
+
+        const updatedUser = await FileService.updateUserPhoto(roomId, username, filePath);
+
+        if (!updatedUser) {
+            return res.status(500).json({ error: "Failed to update photo" });
+        }
+
+        io.to(roomId).emit("USER_PHOTO_UPDATED", updatedUser);
+
+        res.json({
+            success: true,
+            photo: updatedUser.photo
+        });
+
+    } catch (error) {
+        console.error("ERROR /upload-photo", error)
+        res.status(500).json({ error: "Server error" })
+    }
+})
+
+app.use("/uploads", express.static(path.join(__dirname, "../uploads")))
 
 io.on("connection", (socket) => {
     console.log(`[Socket] User connected: ${socket.id}`)
@@ -175,34 +222,33 @@ io.on("connection", (socket) => {
     // Handle user joining room with password protection
     socket.on(SocketEvent.JOIN_REQUEST, async ({ roomId, username, password, roomName = "Collaborative Room" }) => {
         try {
-            console.log(`[Socket] JOIN_REQUEST: "${username}" to room "${roomId}"`)
+            console.log(`[Socket] JOIN_REQUEST: "${username}" to room "${roomId}"`);
 
             if (!roomId || !username) {
                 throw new Error('Room ID and username are required');
             }
 
-            // Check if room exists, if not CREATE IT
+            // If room does not exist, create it
             const roomExists = await FileService.checkRoomExists(roomId);
 
             if (!roomExists) {
-                console.log(`[Socket] Room does not exist, creating new room: ${roomId}`);
-                const roomCreated = await FileService.createRoomIfNotExists(roomId, roomName, password);
-
-                if (!roomCreated) {
-                    throw new Error('Failed to create room automatically');
-                }
+                await FileService.createRoomIfNotExists(roomId, roomName, password);
             }
 
-            // Add user to room in database
-            const userAdded = await FileService.addUserToRoom(roomId, username);
+            // Check if username already exists in the DB
+            const userExists = await FileService.isUserInRoom(roomId, username);
 
-            if (!userAdded) {
-                throw new Error('Failed to add user to room');
+            // Insert only if new user
+            if (!userExists) {
+                await FileService.addUserToRoom(roomId, username);
+            } else {
+                console.log(`[Socket] Username "${username}" already exists → skip DB insert.`);
             }
 
-            // Check if username already exists in the room and generate unique display name if needed
+            // Check duplicates in active session (UI)
             const existingUsersInRoom = getUsersInRoom(roomId);
             const finalUsername = generateUniqueUsername(username, existingUsersInRoom);
+            const userPhoto = await FileService.getUserPhoto(roomId, username);
 
             const user = {
                 username: finalUsername,
@@ -212,33 +258,32 @@ io.on("connection", (socket) => {
                 typing: false,
                 socketId: socket.id,
                 currentFile: null,
-            }
-            userSocketMap.push(user)
-            socket.join(roomId)
+                photo: userPhoto || undefined
+            };
 
-            // Get file structure from database
+            userSocketMap.push(user);
+            socket.join(roomId);
+
             const fileStructure = await FileService.getFileStructure(roomId);
-            const users = getUsersInRoom(roomId)
+            const users = getUsersInRoom(roomId);
 
-            // Notify others
-            socket.broadcast.to(roomId).emit(SocketEvent.USER_JOINED, { user })
+            // Notify others about this user
+            socket.broadcast.to(roomId).emit(SocketEvent.USER_JOINED, { user });
 
-            // Send acceptance to user
             io.to(socket.id).emit(SocketEvent.JOIN_ACCEPTED, {
                 user,
                 users,
                 fileStructure,
-                roomName: roomName
-            })
+                roomName
+            });
 
-            console.log(`[Socket] User ${finalUsername} joined room successfully: ${roomId}`)
+            console.log(`[Socket] User ${finalUsername} joined room: ${roomId}`);
         } catch (error) {
-            console.error('[Socket] Error joining room:', error)
-            io.to(socket.id).emit(SocketEvent.ERROR, {
-                message: 'Failed to join room'
-            })
+            console.error('[Socket] Error joining room:', error);
+            io.to(socket.id).emit(SocketEvent.ERROR, { message: 'Failed to join room' });
         }
-    })
+    });
+
 
     // Broadcast to all clients in the room
     socket.on(SocketEvent.SYNC_FILE_STRUCTURE, ({ fileStructure, openFiles, activeFile, socketId }) => {
@@ -512,9 +557,6 @@ io.on("connection", (socket) => {
         }
     })
 
-    // REST OF THE CODE REMAINS THE SAME (user status, chat, cursor, drawing, etc.)
-    // ... [Keep all the existing user status, chat, cursor, and drawing handlers from your old code]
-
     socket.on(SocketEvent.USER_OFFLINE, ({ socketId }) => {
         userSocketMap = userSocketMap.map((user) => {
             if (user.socketId === socketId) {
@@ -665,6 +707,36 @@ io.on("connection", (socket) => {
             snapshot,
         })
     })
+
+    socket.on("USER_PHOTO_UPDATED", async ({ username, photo }) => {
+        try {
+            const roomId = getRoomId(socket.id)
+            if (!roomId) return
+
+            console.log(`[Socket] User photo updated: ${username} in room ${roomId}`)
+
+            userSocketMap = userSocketMap.map(user => {
+                if (user.username === username && user.roomId === roomId) {
+                    return { ...user, 
+                        photo: photo || undefined 
+                    }
+                }
+                return user
+            })
+
+            await FileService.updateUserPhoto(roomId, username, photo);
+
+            io.to(roomId).emit("USER_PHOTO_UPDATED", {
+                username,
+                photo: photo || undefined
+            })
+
+            console.log(`[Socket] Photo update broadcasted for user: ${username}`)
+        } catch (error) {
+            console.error('[Socket] Error updating user photo:', error)
+        }
+    })
+
 
     socket.on("disconnecting", async () => {
         const user = getUserBySocketId(socket.id)

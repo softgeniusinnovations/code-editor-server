@@ -8,6 +8,7 @@ export interface User {
     currentFile: string | null;
     selectionStart?: number;
     selectionEnd?: number;
+    photo?: string | null;
 }
 
 export enum USER_CONNECTION_STATUS {

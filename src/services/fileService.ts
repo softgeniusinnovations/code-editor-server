@@ -74,6 +74,14 @@ export class FileService {
         }
     }
 
+    static async isUserInRoom(roomId: string, username: string): Promise<boolean> {
+        const rows: any = await query(
+            "SELECT * FROM room_users WHERE room_id = ? AND username = ?",
+            [roomId, username]
+        );
+        return rows.length > 0;
+    }
+
     static async addUserToRoom(roomId: string, username: string): Promise<boolean> {
         try {
             console.log(`[FileService] Adding user ${username} to room ${roomId}`);
@@ -563,6 +571,46 @@ export class FileService {
             hour12: true
         });
     }
+
+    static async updateUserPhoto(roomId: string, username: string, photo: string) {
+        try {
+            await query(
+                "UPDATE room_users SET photo = ? WHERE room_id = ? AND username = ?",
+                [photo, roomId, username]
+            );
+
+            const rows: any = await query(
+                "SELECT username, photo FROM room_users WHERE room_id = ? AND username = ?",
+                [roomId, username]
+            );
+
+            if (rows.length === 0) return null;
+
+            return rows[0];
+        } catch (error) {
+            console.error("[FileService] Error updating user photo:", error);
+            return null;
+        }
+    }
+
+    static async getUserPhoto(roomId: string, username: string): Promise<string | null> {
+        try {
+            const rows: any = await query(
+                "SELECT photo FROM room_users WHERE room_id = ? AND username = ?",
+                [roomId, username]
+            );
+
+            if (rows.length === 0) return null;
+
+            const photo = rows[0].photo;
+            return photo && photo.trim() !== '' ? photo : null;
+        } catch (error) {
+            console.error("[FileService] Error getting user photo:", error);
+            return null;
+        }
+    }
+
+
 
     private static generateFileId(): string {
         return `file_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
