@@ -45,6 +45,8 @@ enum SocketEvent {
     LOAD_FILE_STRUCTURE = "load-file-structure",
     LOAD_CHAT_HISTORY = 'load_chat_history',
     CHAT_HISTORY_LOADED = 'chat_history_loaded',
+    ROOM_INFO = "room-info",
+    
 }
 
 interface SocketContext {

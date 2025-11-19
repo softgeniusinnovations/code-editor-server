@@ -54,4 +54,5 @@ export interface RoomInfo {
     has_password: boolean;
     created_at: string;
     user_count: number;
+    owner_name?: string;
 }

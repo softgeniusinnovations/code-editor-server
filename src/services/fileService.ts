@@ -15,7 +15,7 @@ export class FileService {
         return roomPath;
     }
 
-    static async createRoom(roomId: string, roomName: string, password?: string): Promise<boolean> {
+    static async createRoom(roomId: string, roomName: string, password?: string, ownerName?: string): Promise<boolean> {
         try {
             console.log(`[FileService] Creating room: ${roomId} with name: ${roomName}`);
 
@@ -38,8 +38,8 @@ export class FileService {
 
             // Insert into rooms table
             const result: any = await query(
-                'INSERT INTO rooms (room_id, room_name, password) VALUES (?, ?, ?)',
-                [roomId, roomName, hashedPassword]
+                'INSERT INTO rooms (room_id, room_name, password, owner_name) VALUES (?, ?, ?, ?)',
+                [roomId, roomName, hashedPassword, ownerName]
             );
 
             // Create room directory
@@ -54,7 +54,7 @@ export class FileService {
         }
     }
 
-    static async createRoomIfNotExists(roomId: string, roomName: string, password?: string): Promise<boolean> {
+    static async createRoomIfNotExists(roomId: string, roomName: string, password?: string, ownerName?: string): Promise<boolean> {
         try {
             console.log(`[FileService] Checking if room exists: ${roomId}`);
 
@@ -63,7 +63,7 @@ export class FileService {
 
             if (!roomExists) {
                 console.log(`[FileService] Room does not exist, creating new room: ${roomId}`);
-                return await this.createRoom(roomId, roomName, password);
+                return await this.createRoom(roomId, roomName, password, ownerName);
             }
 
             console.log(`[FileService] Room already exists: ${roomId}`);
@@ -117,7 +117,7 @@ export class FileService {
     static async getRoomInfo(roomId: string): Promise<RoomInfo | null> {
         try {
             const results: any = await query(
-                `SELECT r.room_id, r.room_name, r.password, r.created_at, 
+                `SELECT r.room_id, r.room_name, r.owner_name, r.password, r.created_at, 
                         COUNT(ru.id) as user_count
                  FROM rooms r
                  LEFT JOIN room_users ru ON r.room_id = ru.room_id
@@ -134,6 +134,7 @@ export class FileService {
             return {
                 room_id: room.room_id,
                 room_name: room.room_name,
+                owner_name: room.owner_name,
                 has_password: room.password !== null,
                 created_at: room.created_at,
                 user_count: parseInt(room.user_count) || 0
