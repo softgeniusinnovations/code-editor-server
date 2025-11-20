@@ -9,6 +9,8 @@ export interface User {
     selectionStart?: number;
     selectionEnd?: number;
     photo?: string | null;
+    isOwner?: boolean;
+    isActive?: boolean;
 }
 
 export enum USER_CONNECTION_STATUS {

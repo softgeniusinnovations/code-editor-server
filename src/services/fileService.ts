@@ -20,36 +20,37 @@ export class FileService {
         try {
             console.log(`[FileService] Creating room: ${roomId} with name: ${roomName}, owner: ${ownerName}`);
 
-            // First check if room already exists
+            // Check if room already exists (any state)
             const existingRoom: any = await query(
-                'SELECT room_id FROM rooms WHERE room_id = ?',
+                'SELECT room_id, is_delete FROM rooms WHERE room_id = ?',
                 [roomId]
             );
 
             if (existingRoom.length > 0) {
                 console.log(`[FileService] Room already exists: ${roomId}`);
+                if (existingRoom[0].is_delete) {
+                    console.warn(`[FileService] Room ${roomId} is soft-deleted — refusing to recreate.`);
+                    return false;
+                }
                 return true;
             }
 
-            // Hash password if provided
             let hashedPassword = null;
             if (password && password.trim() !== '') {
                 hashedPassword = await bcrypt.hash(password, 10);
             }
 
-            // Insert into rooms table
-            const result: any = await query(
+            await query(
                 'INSERT INTO rooms (room_id, room_name, password, owner_name) VALUES (?, ?, ?, ?)',
                 [roomId, roomName, hashedPassword, ownerName || null]
             );
 
-            // If ownerName is provided, also add them as a room user
             if (ownerName) {
                 await query(
-                    'INSERT INTO room_users (room_id, username) VALUES (?, ?)',
+                    'INSERT INTO room_users (room_id, username, is_active, is_banned) VALUES (?, ?, 1, 0)',
                     [roomId, ownerName]
                 );
-                console.log(`[FileService] Owner ${ownerName} added to room ${roomId}`);
+                console.log(`[FileService] Owner ${ownerName} added to room ${roomId} (active)`);
             }
 
             // Create room directory
@@ -63,6 +64,7 @@ export class FileService {
             return false;
         }
     }
+
 
     static async createRoomIfNotExists(roomId: string, roomName: string, password?: string, ownerName?: string): Promise<boolean> {
         try {
@@ -92,27 +94,240 @@ export class FileService {
         return rows.length > 0;
     }
 
-    static async addUserToRoom(roomId: string, username: string): Promise<boolean> {
+    static async addUserToRoom(roomId: string, username: string, isActive: boolean = false): Promise<boolean> {
         try {
-            console.log(`[FileService] Adding user ${username} to room ${roomId}`);
+            console.log(`[FileService] Adding/updating user ${username} to room ${roomId} with is_active: ${isActive}`);
 
-            const result: any = await query(
-                'INSERT INTO room_users (room_id, username) VALUES (?, ?)',
+            // Check if user already exists
+            const existing: any = await query(
+                'SELECT id, is_banned FROM room_users WHERE room_id = ? AND username = ?',
                 [roomId, username]
+            );
+
+            if (existing.length > 0) {
+                if (existing[0].is_banned) {
+                    console.warn(`[FileService] User ${username} is banned in room ${roomId} — cannot add/activate`);
+                    return false;
+                }
+                // Update active status
+                await query(
+                    'UPDATE room_users SET is_active = ? WHERE room_id = ? AND username = ?',
+                    [isActive ? 1 : 0, roomId, username]
+                );
+                console.log(`[FileService] User ${username} updated in room ${roomId} (is_active=${isActive})`);
+                return true;
+            }
+
+            // Insert new user
+            await query(
+                'INSERT INTO room_users (room_id, username, is_active, is_banned) VALUES (?, ?, ?, 0)',
+                [roomId, username, isActive ? 1 : 0]
             );
 
             console.log(`[FileService] User ${username} added to room ${roomId} successfully`);
             return true;
         } catch (error) {
-            console.error('[FileService] Error adding user to room:', error);
+            console.error('[FileService] Error adding/updating user to room:', error);
             return false;
         }
     }
 
+
+    static async reactivateRoom(roomId: string): Promise<boolean> {
+        try {
+            console.log(`[FileService] Reactivating room: ${roomId}`);
+
+            await query(
+                'UPDATE rooms SET is_active = 1, is_delete = 0 WHERE room_id = ?',
+                [roomId]
+            );
+
+            console.log(`[FileService] Room ${roomId} reactivated successfully`);
+            return true;
+        } catch (error) {
+            console.error('[FileService] Error reactivating room:', error);
+            return false;
+        }
+    }
+
+    static async isUserBanned(roomId: string, username: string): Promise<{ banned: boolean, reason: string | null }> {
+        try {
+            const rows: any = await query(
+                "SELECT is_banned, reason FROM room_users WHERE room_id = ? AND username = ?",
+                [roomId, username]
+            );
+
+            if (rows.length === 0) {
+                return { banned: false, reason: null };
+            }
+
+            return {
+                banned: Boolean(rows[0].is_banned),
+                reason: rows[0].reason
+            };
+        } catch (error) {
+            console.error('[FileService] Error checking if user is banned:', error);
+            return { banned: false, reason: null };
+        }
+    }
+
+    static async banUser(roomId: string, username: string, reason: string = ""): Promise<boolean> {
+        try {
+            await query(
+                "UPDATE room_users SET is_banned = 1, reason = ? WHERE room_id = ? AND username = ?",
+                [reason, roomId, username]
+            );
+            return true;
+        } catch (error) {
+            console.error('[FileService] Error banning user:', error);
+            return false;
+        }
+    }
+
+    static async unbanUser(roomId: string, username: string): Promise<boolean> {
+        try {
+            await query(
+                "UPDATE room_users SET is_banned = 0, reason = NULL WHERE room_id = ? AND username = ?",
+                [roomId, username]
+            );
+            return true;
+        } catch (error) {
+            console.error('[FileService] Error unbanning user:', error);
+            return false;
+        }
+    }
+
+    static async activateUserInRoom(roomId: string, username: string): Promise<boolean> {
+        try {
+            await query(
+                "UPDATE room_users SET is_active = 1 WHERE room_id = ? AND username = ?",
+                [roomId, username]
+            );
+            return true;
+        } catch (error) {
+            console.error('[FileService] Error activating user in room:', error);
+            return false;
+        }
+    }
+
+    static async checkRoomStatus(roomId: string): Promise<{ isActive: boolean, isDeleted: boolean, ownerName?: string }> {
+        try {
+            const results: any = await query(
+                'SELECT is_active, is_delete, owner_name FROM rooms WHERE room_id = ?',
+                [roomId]
+            );
+
+            if (results.length === 0) {
+                // Room doesn't exist - return default values
+                return { isActive: false, isDeleted: false };
+            }
+
+            const room = results[0];
+            return {
+                isActive: Boolean(room.is_active),
+                isDeleted: Boolean(room.is_delete),
+                ownerName: room.owner_name
+            };
+        } catch (error) {
+            console.error('[FileService] Error checking room status:', error);
+            return { isActive: false, isDeleted: false };
+        }
+    }
+
+    static async updateUserActiveStatus(roomId: string, username: string, isActive: boolean): Promise<boolean> {
+        try {
+            await query(
+                "UPDATE room_users SET is_active = ? WHERE room_id = ? AND username = ?",
+                [isActive, roomId, username]
+            );
+            console.log(`[FileService] User ${username} active status updated to: ${isActive}`);
+            return true;
+        } catch (error) {
+            console.error('[FileService] Error updating user active status:', error);
+            return false;
+        }
+    }
+
+    static async getUserActiveStatus(roomId: string, username: string): Promise<boolean> {
+        try {
+            const rows: any = await query(
+                "SELECT is_active FROM room_users WHERE room_id = ? AND username = ?",
+                [roomId, username]
+            );
+
+            if (rows.length === 0) {
+                return false;
+            }
+
+            return Boolean(rows[0].is_active);
+        } catch (error) {
+            console.error('[FileService] Error getting user active status:', error);
+            return false;
+        }
+    }
+
+    static async getPendingUsers(roomId: string): Promise<any[]> {
+        try {
+            const rows: any = await query(
+                "SELECT username, photo FROM room_users WHERE room_id = ? AND is_active = 0 AND is_banned = 0",
+                [roomId]
+            );
+            return rows;
+        } catch (error) {
+            console.error('[FileService] Error getting pending users:', error);
+            return [];
+        }
+    }
+
+    static async approveUser(roomId: string, username: string): Promise<boolean> {
+        try {
+            await query(
+                "UPDATE room_users SET is_active = 1 WHERE room_id = ? AND username = ?",
+                [roomId, username]
+            );
+            return true;
+        } catch (error) {
+            console.error('[FileService] Error approving user:', error);
+            return false;
+        }
+    }
+
+    static async rejectUser(roomId: string, username: string): Promise<boolean> {
+        try {
+            await query(
+                "DELETE FROM room_users WHERE room_id = ? AND username = ? AND is_active = 0",
+                [roomId, username]
+            );
+            return true;
+        } catch (error) {
+            console.error('[FileService] Error rejecting user:', error);
+            return false;
+        }
+    }
+
+    static async isUserRoomOwner(roomId: string, username: string): Promise<boolean> {
+        try {
+            const results: any = await query(
+                'SELECT owner_name FROM rooms WHERE room_id = ?',
+                [roomId]
+            );
+
+            if (results.length === 0) {
+                return false;
+            }
+
+            return results[0].owner_name === username;
+        } catch (error) {
+            console.error('[FileService] Error checking if user is room owner:', error);
+            return false;
+        }
+    }
+
+
     static async checkRoomExists(roomId: string): Promise<boolean> {
         try {
             const results: any = await query(
-                'SELECT room_id FROM rooms WHERE room_id = ? AND is_active = 1',
+                'SELECT room_id FROM rooms WHERE room_id = ?',
                 [roomId]
             );
             const exists = results.length > 0;
@@ -123,6 +338,7 @@ export class FileService {
             return false;
         }
     }
+
 
     static async getRoomInfo(roomId: string): Promise<RoomInfo | null> {
         try {
