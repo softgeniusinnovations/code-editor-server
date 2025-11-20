@@ -38,15 +38,19 @@ enum SocketEvent {
     ROOM_INFO_RESPONSE = "room-info-response",
     CHECK_ROOM_PASSWORD = "check-room-password",
     PASSWORD_VALID = "password-valid",
-	CHAT_HISTORY_REQUEST = "chat-history-request",
+    CHAT_HISTORY_REQUEST = "chat-history-request",
     CHAT_HISTORY_RESPONSE = "chat-history-response",
     CHAT_MESSAGE_SENT = "chat-message-sent",
     FILE_STRUCTURE_LOADED = "file-structure-loaded",
     LOAD_FILE_STRUCTURE = "load-file-structure",
     LOAD_CHAT_HISTORY = 'load_chat_history',
     CHAT_HISTORY_LOADED = 'chat_history_loaded',
-    ROOM_INFO = "room-info",
-    
+
+    EDIT_ROOM_REQUEST = 'EDIT_ROOM_REQUEST',
+    EDIT_ROOM_RESPONSE = 'EDIT_ROOM_RESPONSE',
+    ROOM_OWNER_CHECK = 'ROOM_OWNER_CHECK',
+    ROOM_OWNER_RESPONSE = 'ROOM_OWNER_RESPONSE',
+    ROOM_UPDATED = 'ROOM_UPDATED',
 }
 
 interface SocketContext {

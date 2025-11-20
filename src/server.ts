@@ -9,6 +9,7 @@ import path from "path"
 import { FileService } from "./services/fileService"
 import { v4 as uuidv4 } from 'uuid'
 import multer from "multer"
+import { RoomService } from './services/roomService';
 
 dotenv.config()
 
@@ -219,7 +220,6 @@ io.on("connection", (socket) => {
         }
     });
 
-    // Handle user joining room with password protection
     socket.on(SocketEvent.JOIN_REQUEST, async ({ roomId, username, password, roomName = "Collaborative Room" }) => {
         try {
             console.log(`[Socket] JOIN_REQUEST: "${username}" to room "${roomId}"`);
@@ -228,24 +228,39 @@ io.on("connection", (socket) => {
                 throw new Error('Room ID and username are required');
             }
 
-            // If room does not exist, create it
             const roomExists = await FileService.checkRoomExists(roomId);
 
             if (!roomExists) {
-                await FileService.createRoomIfNotExists(roomId, roomName, password);
+                console.log(`[Socket] Room ${roomId} does not exist, creating it...`);
+                const roomCreated = await FileService.createRoom(roomId, roomName, password, username);
+
+                if (!roomCreated) {
+                    throw new Error('Failed to create room');
+                }
+                console.log(`[Socket] Room ${roomId} created successfully`);
+            } else {
+                console.log(`[Socket] Room ${roomId} already exists`);
+
+                if (password) {
+                    const isValid = await FileService.verifyRoomPassword(roomId, password);
+                    if (!isValid) {
+                        io.to(socket.id).emit(SocketEvent.PASSWORD_INCORRECT, { roomId });
+                        return;
+                    }
+                }
             }
 
-            // Check if username already exists in the DB
             const userExists = await FileService.isUserInRoom(roomId, username);
 
-            // Insert only if new user
             if (!userExists) {
-                await FileService.addUserToRoom(roomId, username);
+                const userAdded = await FileService.addUserToRoom(roomId, username);
+                if (!userAdded) {
+                    throw new Error('Failed to add user to room');
+                }
             } else {
                 console.log(`[Socket] Username "${username}" already exists → skip DB insert.`);
             }
 
-            // Check duplicates in active session (UI)
             const existingUsersInRoom = getUsersInRoom(roomId);
             const finalUsername = generateUniqueUsername(username, existingUsersInRoom);
             const userPhoto = await FileService.getUserPhoto(roomId, username);
@@ -267,7 +282,6 @@ io.on("connection", (socket) => {
             const fileStructure = await FileService.getFileStructure(roomId);
             const users = getUsersInRoom(roomId);
 
-            // Notify others about this user
             socket.broadcast.to(roomId).emit(SocketEvent.USER_JOINED, { user });
 
             io.to(socket.id).emit(SocketEvent.JOIN_ACCEPTED, {
@@ -717,8 +731,9 @@ io.on("connection", (socket) => {
 
             userSocketMap = userSocketMap.map(user => {
                 if (user.username === username && user.roomId === roomId) {
-                    return { ...user, 
-                        photo: photo || undefined 
+                    return {
+                        ...user,
+                        photo: photo || undefined
                     }
                 }
                 return user
@@ -749,6 +764,77 @@ io.on("connection", (socket) => {
         socket.leave(roomId)
         console.log(`[Socket] User disconnected: ${socket.id} from room: ${roomId}`)
     })
+
+    socket.on(SocketEvent.ROOM_OWNER_CHECK, async ({ roomId }) => {
+        try {
+            const user = getUserBySocketId(socket.id);
+            if (!user) {
+                io.to(socket.id).emit(SocketEvent.ERROR, { message: 'User not found' });
+                return;
+            }
+
+            const isOwner = await RoomService.isRoomOwner(roomId, user.username);
+
+            io.to(socket.id).emit(SocketEvent.ROOM_OWNER_RESPONSE, {
+                isOwner,
+                roomId
+            });
+
+            console.log(`[Socket] Room owner check for ${user.username} in ${roomId}: ${isOwner}`);
+        } catch (error) {
+            console.error('[Socket] Error checking room owner:', error);
+            io.to(socket.id).emit(SocketEvent.ERROR, { message: 'Failed to check room ownership' });
+        }
+    });
+
+    socket.on(SocketEvent.EDIT_ROOM_REQUEST, async (editRequest) => {
+        try {
+            const user = getUserBySocketId(socket.id);
+            if (!user) {
+                io.to(socket.id).emit(SocketEvent.EDIT_ROOM_RESPONSE, {
+                    success: false,
+                    message: 'User not found'
+                });
+                return;
+            }
+
+            console.log(`[Socket] EDIT_ROOM_REQUEST for room: ${editRequest.roomId} by ${user.username}`);
+
+            const response = await RoomService.editRoom(editRequest, user.username);
+
+            if (response.success) {
+                const updatedRoomInfo = await RoomService.getRoomInfo(editRequest.roomId);
+
+                io.to(editRequest.roomId).emit(SocketEvent.EDIT_ROOM_RESPONSE, {
+                    ...response,
+                    roomInfo: updatedRoomInfo,
+                    updatedBy: user.username
+                });
+
+                io.to(editRequest.roomId).emit(SocketEvent.ROOM_INFO_RESPONSE, {
+                    roomInfo: updatedRoomInfo
+                });
+
+                if (editRequest.isDelete === true) {
+                    io.to(editRequest.roomId).emit(SocketEvent.ERROR, {
+                        message: `Room has been deleted by the owner`
+                    });
+                }
+            } else {
+                io.to(socket.id).emit(SocketEvent.EDIT_ROOM_RESPONSE, response);
+            }
+
+            console.log(`[Socket] Room edit completed for ${editRequest.roomId}: ${response.success}`);
+        } catch (error) {
+            console.error('[Socket] Error editing room:', error);
+            io.to(socket.id).emit(SocketEvent.EDIT_ROOM_RESPONSE, {
+                success: false,
+                message: 'Failed to update room'
+            });
+        }
+    });
+
+
 })
 
 const PORT = process.env.PORT || 3000

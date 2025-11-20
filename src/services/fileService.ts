@@ -4,6 +4,7 @@ import { query } from '../db';
 import { RoomFile, FileStructure, RoomInfo } from '../types/user';
 import bcrypt from 'bcryptjs';
 
+
 const FILE_STORAGE_PATH = process.env.FILE_STORAGE_PATH || './file_storage';
 
 export class FileService {
@@ -17,7 +18,7 @@ export class FileService {
 
     static async createRoom(roomId: string, roomName: string, password?: string, ownerName?: string): Promise<boolean> {
         try {
-            console.log(`[FileService] Creating room: ${roomId} with name: ${roomName}`);
+            console.log(`[FileService] Creating room: ${roomId} with name: ${roomName}, owner: ${ownerName}`);
 
             // First check if room already exists
             const existingRoom: any = await query(
@@ -39,8 +40,17 @@ export class FileService {
             // Insert into rooms table
             const result: any = await query(
                 'INSERT INTO rooms (room_id, room_name, password, owner_name) VALUES (?, ?, ?, ?)',
-                [roomId, roomName, hashedPassword, ownerName]
+                [roomId, roomName, hashedPassword, ownerName || null]
             );
+
+            // If ownerName is provided, also add them as a room user
+            if (ownerName) {
+                await query(
+                    'INSERT INTO room_users (room_id, username) VALUES (?, ?)',
+                    [roomId, ownerName]
+                );
+                console.log(`[FileService] Owner ${ownerName} added to room ${roomId}`);
+            }
 
             // Create room directory
             const roomPath = this.ensureRoomDirectory(roomId);
@@ -117,11 +127,11 @@ export class FileService {
     static async getRoomInfo(roomId: string): Promise<RoomInfo | null> {
         try {
             const results: any = await query(
-                `SELECT r.room_id, r.room_name, r.owner_name, r.password, r.created_at, 
+                `SELECT r.room_id, r.room_name, r.owner_name, r.password, r.created_at, r.is_active, r.is_delete, r.created_at,
                         COUNT(ru.id) as user_count
                  FROM rooms r
                  LEFT JOIN room_users ru ON r.room_id = ru.room_id
-                 WHERE r.room_id = ? AND r.is_active = 1
+                 WHERE r.room_id = ? 
                  GROUP BY r.room_id`,
                 [roomId]
             );
@@ -136,6 +146,8 @@ export class FileService {
                 room_name: room.room_name,
                 owner_name: room.owner_name,
                 has_password: room.password !== null,
+                is_active: Boolean(room.is_active),
+                is_delete: Boolean(room.is_delete),
                 created_at: room.created_at,
                 user_count: parseInt(room.user_count) || 0
             };
