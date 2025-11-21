@@ -13,6 +13,9 @@ const socket_io_1 = require("socket.io");
 const path_1 = __importDefault(require("path"));
 const fileService_1 = require("./services/fileService");
 const uuid_1 = require("uuid");
+const multer_1 = __importDefault(require("multer"));
+const roomService_1 = require("./services/roomService");
+const db_1 = require("./db");
 dotenv_1.default.config();
 const app = (0, express_1.default)();
 app.use(express_1.default.json());
@@ -58,6 +61,41 @@ function generateUniqueUsername(baseUsername, existingUsers) {
     }
     return uniqueUsername;
 }
+const storage = multer_1.default.diskStorage({
+    destination: (req, file, cb) => {
+        cb(null, path_1.default.join(__dirname, "../uploads"));
+    },
+    filename: (req, file, cb) => {
+        const ext = path_1.default.extname(file.originalname);
+        const unique = Date.now() + "-" + Math.round(Math.random() * 1e9);
+        cb(null, unique + ext);
+    }
+});
+const upload = (0, multer_1.default)({ storage });
+// ------------ USER PHOTO UPLOAD -------------
+app.post("/upload-photo", upload.single("photo"), async (req, res) => {
+    try {
+        const { roomId, username } = req.body;
+        if (!req.file) {
+            return res.status(400).json({ error: "No file uploaded" });
+        }
+        const filePath = `/uploads/${req.file.filename}`;
+        const updatedUser = await fileService_1.FileService.updateUserPhoto(roomId, username, filePath);
+        if (!updatedUser) {
+            return res.status(500).json({ error: "Failed to update photo" });
+        }
+        io.to(roomId).emit("USER_PHOTO_UPDATED", updatedUser);
+        res.json({
+            success: true,
+            photo: updatedUser.photo
+        });
+    }
+    catch (error) {
+        console.error("ERROR /upload-photo", error);
+        res.status(500).json({ error: "Server error" });
+    }
+});
+app.use("/uploads", express_1.default.static(path_1.default.join(__dirname, "../uploads")));
 io.on("connection", (socket) => {
     console.log(`[Socket] User connected: ${socket.id}`);
     // Handle room creation with password
@@ -69,13 +107,24 @@ io.on("connection", (socket) => {
             }
             const roomId = (0, uuid_1.v4)();
             console.log(`[Socket] Generated room ID: ${roomId}`);
-            // Create room in database
-            const roomCreated = await fileService_1.FileService.createRoom(roomId, roomName, password);
-            if (!roomCreated) {
-                throw new Error('Failed to create room in database');
+            // Check if room already exists and is deleted/inactive
+            const roomStatus = await fileService_1.FileService.checkRoomStatus(roomId);
+            if (roomStatus.isDeleted || !roomStatus.isActive) {
+                io.to(socket.id).emit(socket_1.SocketEvent.ERROR, {
+                    message: 'Cannot create room with this code. The room has been deleted or is inactive.'
+                });
+                return;
             }
-            // Add user to room
-            const userAdded = await fileService_1.FileService.addUserToRoom(roomId, username);
+            // Create room in database
+            const roomCreated = await fileService_1.FileService.createRoom(roomId, roomName, password, username);
+            if (!roomCreated) {
+                io.to(socket.id).emit(socket_1.SocketEvent.ERROR, {
+                    message: 'Cannot create room: a room with this ID may be deleted or already exist.'
+                });
+                return;
+            }
+            // Add user to room with active status (room owner)
+            const userAdded = await fileService_1.FileService.addUserToRoom(roomId, username, true); // true for is_active
             if (!userAdded) {
                 throw new Error('Failed to add user to room');
             }
@@ -88,6 +137,8 @@ io.on("connection", (socket) => {
                 typing: false,
                 socketId: socket.id,
                 currentFile: null,
+                isActive: true,
+                isOwner: true
             };
             userSocketMap.push(user);
             socket.join(roomId);
@@ -149,30 +200,140 @@ io.on("connection", (socket) => {
             });
         }
     });
-    // Handle user joining room with password protection
     socket.on(socket_1.SocketEvent.JOIN_REQUEST, async ({ roomId, username, password, roomName = "Collaborative Room" }) => {
         try {
             console.log(`[Socket] JOIN_REQUEST: "${username}" to room "${roomId}"`);
             if (!roomId || !username) {
                 throw new Error('Room ID and username are required');
             }
-            // Check if room exists, if not CREATE IT
             const roomExists = await fileService_1.FileService.checkRoomExists(roomId);
+            let isActiveUser = false;
             if (!roomExists) {
-                console.log(`[Socket] Room does not exist, creating new room: ${roomId}`);
-                const roomCreated = await fileService_1.FileService.createRoomIfNotExists(roomId, roomName, password);
+                console.log(`[Socket] Room ${roomId} does not exist, creating it...`);
+                // Don't check room status for new rooms - create it directly
+                const roomCreated = await fileService_1.FileService.createRoom(roomId, roomName, password, username);
                 if (!roomCreated) {
-                    throw new Error('Failed to create room automatically');
+                    throw new Error('Failed to create room');
+                }
+                console.log(`[Socket] Room ${roomId} created successfully`);
+                // Room creator (owner) should be active
+                isActiveUser = true;
+            }
+            else {
+                console.log(`[Socket] Room ${roomId} already exists`);
+                // Only check room status for EXISTING rooms
+                const roomStatus = await fileService_1.FileService.checkRoomStatus(roomId);
+                // Check if user is the room owner
+                const isRoomOwner = await fileService_1.FileService.isUserRoomOwner(roomId, username);
+                // Room owners can always join, even if room is inactive or deleted
+                if (!isRoomOwner) {
+                    if (roomStatus.isDeleted) {
+                        io.to(socket.id).emit(socket_1.SocketEvent.ERROR, {
+                            message: 'This room has been deleted and is no longer available.'
+                        });
+                        return;
+                    }
+                    if (!roomStatus.isActive) {
+                        io.to(socket.id).emit(socket_1.SocketEvent.ERROR, {
+                            message: 'This room is currently inactive.'
+                        });
+                        return;
+                    }
+                }
+                else {
+                    console.log(`[Socket] Room owner ${username} joining, bypassing room status checks`);
+                    // Reactivate the room if owner is joining an inactive room
+                    if (!roomStatus.isActive || roomStatus.isDeleted) {
+                        console.log(`[Socket] Reactivating room ${roomId} as owner is joining`);
+                        await fileService_1.FileService.reactivateRoom(roomId);
+                    }
+                }
+                // Check if user is banned
+                const banInfo = await fileService_1.FileService.isUserBanned(roomId, username);
+                if (banInfo.banned) {
+                    io.to(socket.id).emit(socket_1.SocketEvent.ERROR, {
+                        message: `You are banned from this room. Reason: ${banInfo.reason || 'No reason provided'}`
+                    });
+                    return;
+                }
+                // Get room info to check password status
+                const roomInfo = await fileService_1.FileService.getRoomInfo(roomId);
+                // Check if user is the room owner
+                const isRoomOwnerCheck = roomInfo && roomInfo.owner_name === username;
+                if (isRoomOwnerCheck) {
+                    // Room owner always has automatic access
+                    isActiveUser = true;
+                    console.log(`[Socket] User ${username} is room owner - granting automatic access`);
+                }
+                else {
+                    // Check if user already exists in room and their current status
+                    const userExistsInRoom = await fileService_1.FileService.isUserInRoom(roomId, username);
+                    if (userExistsInRoom) {
+                        // User already exists - check their current active status
+                        const userActiveStatus = await fileService_1.FileService.getUserActiveStatus(roomId, username);
+                        if (userActiveStatus) {
+                            // User was previously approved - grant immediate access
+                            isActiveUser = true;
+                            console.log(`[Socket] User ${username} was previously approved - granting immediate access`);
+                        }
+                        else {
+                            // User exists but not approved - check if room has password
+                            if (roomInfo && roomInfo.has_password) {
+                                // Room has password - user still needs approval
+                                isActiveUser = false;
+                                console.log(`[Socket] User ${username} exists but not approved - needs approval`);
+                            }
+                            else {
+                                // Room has no password - auto-approve existing user
+                                isActiveUser = true;
+                                await fileService_1.FileService.updateUserActiveStatus(roomId, username, true);
+                                console.log(`[Socket] Room has no password - auto-approving existing user ${username}`);
+                            }
+                        }
+                    }
+                    else {
+                        // New user - first time joining
+                        if (roomInfo && roomInfo.has_password) {
+                            // Room has password - user needs approval
+                            isActiveUser = false;
+                            console.log(`[Socket] New user ${username} in password-protected room - needs approval`);
+                        }
+                        else {
+                            // Room has no password - grant immediate access
+                            isActiveUser = true;
+                            console.log(`[Socket] New user ${username} in open room - granting immediate access`);
+                        }
+                    }
                 }
             }
-            // Add user to room in database
-            const userAdded = await fileService_1.FileService.addUserToRoom(roomId, username);
-            if (!userAdded) {
-                throw new Error('Failed to add user to room');
+            // Always add/update user to room (insert into database)
+            const userExistsInRoom = await fileService_1.FileService.isUserInRoom(roomId, username);
+            if (!userExistsInRoom) {
+                const userAdded = await fileService_1.FileService.addUserToRoom(roomId, username, isActiveUser);
+                if (!userAdded) {
+                    throw new Error('Failed to add user to room');
+                }
+                console.log(`[Socket] User ${username} added to room ${roomId} with active status: ${isActiveUser}`);
             }
-            // Check if username already exists in the room and generate unique display name if needed
+            else {
+                console.log(`[Socket] Username "${username}" already exists → active status: ${isActiveUser}`);
+                // Only update if we're changing the status (like auto-approving)
+                if (isActiveUser) {
+                    await fileService_1.FileService.updateUserActiveStatus(roomId, username, isActiveUser);
+                }
+            }
+            // If user is not active, show pending message
+            if (!isActiveUser) {
+                io.to(socket.id).emit(socket_1.SocketEvent.JOIN_PENDING, {
+                    roomId,
+                    message: 'Your join request is pending approval. Please wait for room owner to approve your request.'
+                });
+                return;
+            }
+            // User is active - proceed with joining
             const existingUsersInRoom = getUsersInRoom(roomId);
             const finalUsername = generateUniqueUsername(username, existingUsersInRoom);
+            const userPhoto = await fileService_1.FileService.getUserPhoto(roomId, username);
             const user = {
                 username: finalUsername,
                 roomId,
@@ -181,28 +342,201 @@ io.on("connection", (socket) => {
                 typing: false,
                 socketId: socket.id,
                 currentFile: null,
+                photo: userPhoto || undefined,
+                isActive: true,
+                isOwner: await fileService_1.FileService.isUserRoomOwner(roomId, username)
             };
             userSocketMap.push(user);
             socket.join(roomId);
-            // Get file structure from database
             const fileStructure = await fileService_1.FileService.getFileStructure(roomId);
             const users = getUsersInRoom(roomId);
-            // Notify others
             socket.broadcast.to(roomId).emit(socket_1.SocketEvent.USER_JOINED, { user });
-            // Send acceptance to user
             io.to(socket.id).emit(socket_1.SocketEvent.JOIN_ACCEPTED, {
                 user,
                 users,
                 fileStructure,
-                roomName: roomName
+                roomName
             });
-            console.log(`[Socket] User ${finalUsername} joined room successfully: ${roomId}`);
+            console.log(`[Socket] User ${finalUsername} joined room: ${roomId} with active status: ${isActiveUser}`);
         }
         catch (error) {
             console.error('[Socket] Error joining room:', error);
-            io.to(socket.id).emit(socket_1.SocketEvent.ERROR, {
-                message: 'Failed to join room'
-            });
+            io.to(socket.id).emit(socket_1.SocketEvent.ERROR, { message: 'Failed to join room' });
+        }
+    });
+    socket.on(socket_1.SocketEvent.GET_PENDING_USERS, async ({ roomId }) => {
+        try {
+            const user = getUserBySocketId(socket.id);
+            if (!user)
+                return;
+            // Verify user is room owner
+            const isOwner = await roomService_1.RoomService.isRoomOwner(roomId, user.username);
+            if (!isOwner) {
+                io.to(socket.id).emit(socket_1.SocketEvent.ERROR, { message: 'Only room owner can view pending users' });
+                return;
+            }
+            const pendingUsers = await fileService_1.FileService.getPendingUsers(roomId);
+            io.to(socket.id).emit(socket_1.SocketEvent.PENDING_USERS_LIST, { pendingUsers });
+        }
+        catch (error) {
+            console.error('[Socket] Error getting pending users:', error);
+            io.to(socket.id).emit(socket_1.SocketEvent.ERROR, { message: 'Failed to get pending users' });
+        }
+    });
+    socket.on(socket_1.SocketEvent.APPROVE_USER, async ({ roomId, username }) => {
+        try {
+            const user = getUserBySocketId(socket.id);
+            if (!user)
+                return;
+            // Verify user is room owner
+            const isOwner = await roomService_1.RoomService.isRoomOwner(roomId, user.username);
+            if (!isOwner) {
+                io.to(socket.id).emit(socket_1.SocketEvent.ERROR, { message: 'Only room owner can approve users' });
+                return;
+            }
+            const approved = await fileService_1.FileService.approveUser(roomId, username);
+            if (approved) {
+                io.to(roomId).emit(socket_1.SocketEvent.USER_APPROVED, { username });
+                const pendingUserSocket = userSocketMap.find(u => u.username === username && u.roomId === roomId);
+                if (pendingUserSocket) {
+                    io.to(pendingUserSocket.socketId).emit(socket_1.SocketEvent.JOIN_ACCEPTED, {
+                        user: pendingUserSocket,
+                        users: getUsersInRoom(roomId),
+                        fileStructure: await fileService_1.FileService.getFileStructure(roomId),
+                        roomName: (await fileService_1.FileService.getRoomInfo(roomId))?.room_name || 'Collaborative Room'
+                    });
+                }
+            }
+        }
+        catch (error) {
+            console.error('[Socket] Error approving user:', error);
+            io.to(socket.id).emit(socket_1.SocketEvent.ERROR, { message: 'Failed to approve user' });
+        }
+    });
+    socket.on(socket_1.SocketEvent.REJECT_USER, async ({ roomId, username }) => {
+        try {
+            const user = getUserBySocketId(socket.id);
+            if (!user)
+                return;
+            const isOwner = await roomService_1.RoomService.isRoomOwner(roomId, user.username);
+            if (!isOwner) {
+                io.to(socket.id).emit(socket_1.SocketEvent.ERROR, { message: 'Only room owner can reject users' });
+                return;
+            }
+            const rejected = await fileService_1.FileService.rejectUser(roomId, username);
+            if (rejected) {
+                const rejectedUserSocket = userSocketMap.find(u => u.username === username && u.roomId === roomId);
+                if (rejectedUserSocket) {
+                    io.to(rejectedUserSocket.socketId).emit(socket_1.SocketEvent.JOIN_REJECTED, {
+                        message: 'Your join request was rejected by the room owner.'
+                    });
+                    userSocketMap = userSocketMap.filter(u => u.socketId !== rejectedUserSocket.socketId);
+                }
+            }
+        }
+        catch (error) {
+            console.error('[Socket] Error rejecting user:', error);
+            io.to(socket.id).emit(socket_1.SocketEvent.ERROR, { message: 'Failed to reject user' });
+        }
+    });
+    socket.on("GET_ROOM_USERS", async ({ roomId }) => {
+        try {
+            const user = getUserBySocketId(socket.id);
+            if (!user)
+                return;
+            console.log(`[Socket] GET_ROOM_USERS for room: ${roomId}`);
+            // Get all users in the room from database
+            const roomUsers = await (0, db_1.query)(`SELECT ru.username, ru.photo, ru.is_active, ru.is_banned, 
+                    (SELECT owner_name FROM rooms WHERE room_id = ?) as owner_name
+             FROM room_users ru
+             WHERE ru.room_id = ? 
+             ORDER BY ru.is_banned, ru.is_active, ru.username`, [roomId, roomId]);
+            const formattedUsers = roomUsers.map((user) => ({
+                username: user.username,
+                photo: user.photo,
+                is_active: Boolean(user.is_active),
+                is_banned: Boolean(user.is_banned),
+                is_owner: user.username === user.owner_name
+            }));
+            console.log(`[Socket] Found ${formattedUsers.length} users in room ${roomId}`);
+            io.to(socket.id).emit("ROOM_USERS_LIST", { users: formattedUsers });
+        }
+        catch (error) {
+            console.error('[Socket] Error getting room users:', error);
+            io.to(socket.id).emit("ERROR", { message: 'Failed to get room users' });
+        }
+    });
+    // Update user active status
+    socket.on(socket_1.SocketEvent.UPDATE_USER_STATUS, async ({ roomId, username, is_active }) => {
+        try {
+            const user = getUserBySocketId(socket.id);
+            if (!user)
+                return;
+            // Verify user is room owner
+            const isOwner = await fileService_1.FileService.isUserRoomOwner(roomId, user.username);
+            if (!isOwner) {
+                io.to(socket.id).emit(socket_1.SocketEvent.ERROR, { message: 'Only room owner can update user status' });
+                return;
+            }
+            const updated = await fileService_1.FileService.updateUserActiveStatus(roomId, username, is_active);
+            if (updated) {
+                io.to(roomId).emit(socket_1.SocketEvent.USER_STATUS_UPDATED, { username, is_active });
+            }
+        }
+        catch (error) {
+            console.error('[Socket] Error updating user status:', error);
+            io.to(socket.id).emit(socket_1.SocketEvent.ERROR, { message: 'Failed to update user status' });
+        }
+    });
+    // Ban user
+    socket.on(socket_1.SocketEvent.BAN_USER, async ({ roomId, username, reason }) => {
+        try {
+            const user = getUserBySocketId(socket.id);
+            if (!user)
+                return;
+            // Verify user is room owner
+            const isOwner = await fileService_1.FileService.isUserRoomOwner(roomId, user.username);
+            if (!isOwner) {
+                io.to(socket.id).emit(socket_1.SocketEvent.ERROR, { message: 'Only room owner can ban users' });
+                return;
+            }
+            const banned = await fileService_1.FileService.banUser(roomId, username, reason);
+            if (banned) {
+                io.to(roomId).emit(socket_1.SocketEvent.USER_BANNED_STATUS, { username, is_banned: true });
+                // Notify the banned user
+                const bannedUserSocket = userSocketMap.find(u => u.username === username && u.roomId === roomId);
+                if (bannedUserSocket) {
+                    io.to(bannedUserSocket.socketId).emit(socket_1.SocketEvent.ERROR, {
+                        message: `You have been banned from the room. Reason: ${reason || 'No reason provided'}`
+                    });
+                }
+            }
+        }
+        catch (error) {
+            console.error('[Socket] Error banning user:', error);
+            io.to(socket.id).emit(socket_1.SocketEvent.ERROR, { message: 'Failed to ban user' });
+        }
+    });
+    // Unban user
+    socket.on(socket_1.SocketEvent.UNBAN_USER, async ({ roomId, username }) => {
+        try {
+            const user = getUserBySocketId(socket.id);
+            if (!user)
+                return;
+            // Verify user is room owner
+            const isOwner = await fileService_1.FileService.isUserRoomOwner(roomId, user.username);
+            if (!isOwner) {
+                io.to(socket.id).emit(socket_1.SocketEvent.ERROR, { message: 'Only room owner can unban users' });
+                return;
+            }
+            const unbanned = await fileService_1.FileService.unbanUser(roomId, username);
+            if (unbanned) {
+                io.to(roomId).emit(socket_1.SocketEvent.USER_BANNED_STATUS, { username, is_banned: false });
+            }
+        }
+        catch (error) {
+            console.error('[Socket] Error unbanning user:', error);
+            io.to(socket.id).emit(socket_1.SocketEvent.ERROR, { message: 'Failed to unban user' });
         }
     });
     // Broadcast to all clients in the room
@@ -435,8 +769,6 @@ io.on("connection", (socket) => {
             });
         }
     });
-    // REST OF THE CODE REMAINS THE SAME (user status, chat, cursor, drawing, etc.)
-    // ... [Keep all the existing user status, chat, cursor, and drawing handlers from your old code]
     socket.on(socket_1.SocketEvent.USER_OFFLINE, ({ socketId }) => {
         userSocketMap = userSocketMap.map((user) => {
             if (user.socketId === socketId) {
@@ -575,6 +907,32 @@ io.on("connection", (socket) => {
             snapshot,
         });
     });
+    socket.on("USER_PHOTO_UPDATED", async ({ username, photo }) => {
+        try {
+            const roomId = getRoomId(socket.id);
+            if (!roomId)
+                return;
+            console.log(`[Socket] User photo updated: ${username} in room ${roomId}`);
+            userSocketMap = userSocketMap.map(user => {
+                if (user.username === username && user.roomId === roomId) {
+                    return {
+                        ...user,
+                        photo: photo || undefined
+                    };
+                }
+                return user;
+            });
+            await fileService_1.FileService.updateUserPhoto(roomId, username, photo);
+            io.to(roomId).emit("USER_PHOTO_UPDATED", {
+                username,
+                photo: photo || undefined
+            });
+            console.log(`[Socket] Photo update broadcasted for user: ${username}`);
+        }
+        catch (error) {
+            console.error('[Socket] Error updating user photo:', error);
+        }
+    });
     socket.on("disconnecting", async () => {
         const user = getUserBySocketId(socket.id);
         if (!user)
@@ -586,6 +944,135 @@ io.on("connection", (socket) => {
         userSocketMap = userSocketMap.filter((u) => u.socketId !== socket.id);
         socket.leave(roomId);
         console.log(`[Socket] User disconnected: ${socket.id} from room: ${roomId}`);
+    });
+    socket.on(socket_1.SocketEvent.ROOM_OWNER_CHECK, async ({ roomId }) => {
+        try {
+            const user = getUserBySocketId(socket.id);
+            if (!user) {
+                io.to(socket.id).emit(socket_1.SocketEvent.ERROR, { message: 'User not found' });
+                return;
+            }
+            const isOwner = await roomService_1.RoomService.isRoomOwner(roomId, user.username);
+            io.to(socket.id).emit(socket_1.SocketEvent.ROOM_OWNER_RESPONSE, {
+                isOwner,
+                roomId
+            });
+            console.log(`[Socket] Room owner check for ${user.username} in ${roomId}: ${isOwner}`);
+        }
+        catch (error) {
+            console.error('[Socket] Error checking room owner:', error);
+            io.to(socket.id).emit(socket_1.SocketEvent.ERROR, { message: 'Failed to check room ownership' });
+        }
+    });
+    socket.on(socket_1.SocketEvent.EDIT_ROOM_REQUEST, async (editRequest) => {
+        try {
+            const user = getUserBySocketId(socket.id);
+            if (!user) {
+                io.to(socket.id).emit(socket_1.SocketEvent.EDIT_ROOM_RESPONSE, {
+                    success: false,
+                    message: 'User not found'
+                });
+                return;
+            }
+            console.log(`[Socket] EDIT_ROOM_REQUEST for room: ${editRequest.roomId} by ${user.username}`);
+            const response = await roomService_1.RoomService.editRoom(editRequest, user.username);
+            if (response.success) {
+                const updatedRoomInfo = await roomService_1.RoomService.getRoomInfo(editRequest.roomId);
+                io.to(editRequest.roomId).emit(socket_1.SocketEvent.EDIT_ROOM_RESPONSE, {
+                    ...response,
+                    roomInfo: updatedRoomInfo,
+                    updatedBy: user.username
+                });
+                io.to(editRequest.roomId).emit(socket_1.SocketEvent.ROOM_INFO_RESPONSE, {
+                    roomInfo: updatedRoomInfo
+                });
+                if (editRequest.isDelete === true) {
+                    io.to(editRequest.roomId).emit(socket_1.SocketEvent.ERROR, {
+                        message: `Room has been deleted by the owner`
+                    });
+                }
+            }
+            else {
+                io.to(socket.id).emit(socket_1.SocketEvent.EDIT_ROOM_RESPONSE, response);
+            }
+            console.log(`[Socket] Room edit completed for ${editRequest.roomId}: ${response.success}`);
+        }
+        catch (error) {
+            console.error('[Socket] Error editing room:', error);
+            io.to(socket.id).emit(socket_1.SocketEvent.EDIT_ROOM_RESPONSE, {
+                success: false,
+                message: 'Failed to update room'
+            });
+        }
+    });
+    // WebRTC Signaling events
+    socket.on('WEBRTC_OFFER', async (data) => {
+        try {
+            const user = getUserBySocketId(socket.id);
+            if (!user)
+                return;
+            if (data.targetUser === 'all') {
+                // Broadcast to all other users in the room
+                socket.broadcast.to(data.roomId).emit('WEBRTC_OFFER', {
+                    offer: data.offer,
+                    fromUser: user.username
+                });
+            }
+            else {
+                // Send to specific user
+                const targetUser = userSocketMap.find(u => u.username === data.targetUser && u.roomId === data.roomId);
+                if (targetUser) {
+                    io.to(targetUser.socketId).emit('WEBRTC_OFFER', {
+                        offer: data.offer,
+                        fromUser: user.username
+                    });
+                }
+            }
+        }
+        catch (error) {
+            console.error('[Socket] Error handling WebRTC offer:', error);
+        }
+    });
+    socket.on('WEBRTC_ANSWER', async (data) => {
+        try {
+            const user = getUserBySocketId(socket.id);
+            if (!user)
+                return;
+            const targetUser = userSocketMap.find(u => u.username === data.targetUser && u.roomId === data.roomId);
+            if (targetUser) {
+                io.to(targetUser.socketId).emit('WEBRTC_ANSWER', {
+                    answer: data.answer,
+                    fromUser: user.username
+                });
+            }
+        }
+        catch (error) {
+            console.error('[Socket] Error handling WebRTC answer:', error);
+        }
+    });
+    socket.on('WEBRTC_ICE_CANDIDATE', async (data) => {
+        try {
+            const user = getUserBySocketId(socket.id);
+            if (!user)
+                return;
+            const targetUser = userSocketMap.find(u => u.username === data.targetUser && u.roomId === data.roomId);
+            if (targetUser) {
+                io.to(targetUser.socketId).emit('WEBRTC_ICE_CANDIDATE', {
+                    candidate: data.candidate,
+                    fromUser: user.username
+                });
+            }
+        }
+        catch (error) {
+            console.error('[Socket] Error handling ICE candidate:', error);
+        }
+    });
+    socket.on('USER_AUDIO_TOGGLED', (data) => {
+        // Broadcast to all users in the room
+        socket.broadcast.to(data.roomId).emit('USER_AUDIO_TOGGLED', {
+            username: data.username,
+            isAudioEnabled: data.isAudioEnabled
+        });
     });
 });
 const PORT = process.env.PORT || 3000;
