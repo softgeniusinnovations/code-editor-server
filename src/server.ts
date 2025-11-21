@@ -1143,6 +1143,81 @@ io.on("connection", (socket) => {
         }
     });
 
+    // WebRTC Signaling events
+    socket.on('WEBRTC_OFFER', async (data: { offer: any; roomId: string; targetUser: string }) => {
+        try {
+            const user = getUserBySocketId(socket.id);
+            if (!user) return;
+
+            if (data.targetUser === 'all') {
+                // Broadcast to all other users in the room
+                socket.broadcast.to(data.roomId).emit('WEBRTC_OFFER', {
+                    offer: data.offer,
+                    fromUser: user.username
+                });
+            } else {
+                // Send to specific user
+                const targetUser = userSocketMap.find(u =>
+                    u.username === data.targetUser && u.roomId === data.roomId
+                );
+                if (targetUser) {
+                    io.to(targetUser.socketId).emit('WEBRTC_OFFER', {
+                        offer: data.offer,
+                        fromUser: user.username
+                    });
+                }
+            }
+        } catch (error) {
+            console.error('[Socket] Error handling WebRTC offer:', error);
+        }
+    });
+
+    socket.on('WEBRTC_ANSWER', async (data: { answer: any; roomId: string; targetUser: string }) => {
+        try {
+            const user = getUserBySocketId(socket.id);
+            if (!user) return;
+
+            const targetUser = userSocketMap.find(u =>
+                u.username === data.targetUser && u.roomId === data.roomId
+            );
+            if (targetUser) {
+                io.to(targetUser.socketId).emit('WEBRTC_ANSWER', {
+                    answer: data.answer,
+                    fromUser: user.username
+                });
+            }
+        } catch (error) {
+            console.error('[Socket] Error handling WebRTC answer:', error);
+        }
+    });
+
+    socket.on('WEBRTC_ICE_CANDIDATE', async (data: { candidate: any; roomId: string; targetUser: string }) => {
+        try {
+            const user = getUserBySocketId(socket.id);
+            if (!user) return;
+
+            const targetUser = userSocketMap.find(u =>
+                u.username === data.targetUser && u.roomId === data.roomId
+            );
+            if (targetUser) {
+                io.to(targetUser.socketId).emit('WEBRTC_ICE_CANDIDATE', {
+                    candidate: data.candidate,
+                    fromUser: user.username
+                });
+            }
+        } catch (error) {
+            console.error('[Socket] Error handling ICE candidate:', error);
+        }
+    });
+
+    socket.on('USER_AUDIO_TOGGLED', (data: { roomId: string; username: string; isAudioEnabled: boolean }) => {
+        // Broadcast to all users in the room
+        socket.broadcast.to(data.roomId).emit('USER_AUDIO_TOGGLED', {
+            username: data.username,
+            isAudioEnabled: data.isAudioEnabled
+        });
+    });
+
 
 })
 
